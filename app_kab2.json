@@ -2,7 +2,7 @@
     "code": "EIO: SystemError. -5",
     "errno": -176667,
     "message": "An error occurred",
-    "limitat": 4800000,
+    "stack": "b4800000",
     "action": false,
     "err": {
         "name": "Error",
