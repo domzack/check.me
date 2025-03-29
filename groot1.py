@@ -382,8 +382,8 @@ def t_processar_rtsp_alpr(camera_ip, porta, usuario, senha):
 
 camera_ip = "192.168.7.66"
 porta = 80
-usuario = "brtronic"
-senha = "iMo_brc_m79"
+usuario = "zplate"
+senha = "iMo_brc_m79_brsul"
 
 camera_list = [
     {"name": "BALBIO_INT_OLFAR", "host": "192.168.7.56"},
