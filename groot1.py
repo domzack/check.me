@@ -6,15 +6,12 @@ from onvif import ONVIFCamera
 from datetime import datetime
 import threading
 from queue import Queue
-
-# import time
 import requests
-import base64
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  # Define o nível mínimo para INFO e ERROR
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("alpr_log.log"), logging.StreamHandler()],
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
 color_green = (0, 255, 0)
@@ -32,13 +29,33 @@ threads = {}  # Dicionário para monitorar threads ativas
 lock = threading.Lock()  # Controle de acesso às threads
 
 
+def enviar_imagem_e_json(url, imagem, dados_json):
+    try:
+        # url = 'http://127.0.0.1:3031/pyzplate'
+        _, buffer = cv2.imencode(".jpg", imagem)
+        imagem_bytes = buffer.tobytes()
+        arquivos = {
+            "imagem": ("imagem.jpg", imagem_bytes, "image/jpeg"),
+        }
+        response = requests.post(url, files=arquivos, data=dados_json)
+        if response.status_code != 200:
+            logging.error(
+                f"Erro ao enviar a requisição. Código de status: {response.status_code}"
+            )
+
+    except Exception as e:
+        logging.error(f"Ocorreu um erro: {e}")
+
+
 def post_screenshot(url, imagen, dados_adicionais):
-    _, buffer = cv2.imencode(".jpg", imagen)
-    body = {"image": base64.b64encode(buffer).decode("utf-8"), "data": dados_adicionais}
-    # Fazer a requisição POST
-    resposta = requests.post(url, json=body)
-    # Retornar a resposta (pode incluir o status ou os dados retornados)
-    return resposta.json()
+    url = "http://127.0.0.1:3031/pyzplate"
+    try:
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(url, json=dados_adicionais, headers=headers)
+        return response.status_code
+    except Exception as e:
+        logging.error(f"Erro ao enviar dados: {e}, dados: {dados_adicionais}")
+        return None
 
 
 def obter_rtsp_url(host, porta, usuario, senha):
@@ -60,41 +77,54 @@ def obter_rtsp_url(host, porta, usuario, senha):
 
 
 def adicionar_data_hora(imagem):
-    data_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    altura, largura, _ = imagem.shape
-    (largura_texto, altura_texto), _ = cv2.getTextSize(
-        f"ZPLATE - {data_hora}", fonte, font_size_plate, 1
-    )
-    x_inicio = largura - largura_texto - 10
-    y_inicio = 0
-    x_fim = largura
-    y_fim = y_inicio + altura_texto + 10
-    cv2.rectangle(
-        imagem, (x_inicio, y_inicio), (x_fim, y_fim), color_black, thickness=-1
-    )
-    cv2.putText(
-        imagem,
-        data_hora,
-        (x_inicio + 5, y_inicio + altura_texto + 5),
-        fonte,
-        font_size_plate,
-        color_white,
-        1,
-    )
-    return imagem
+    try:
+        data_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        altura, largura, _ = imagem.shape
+        (largura_texto, altura_texto), _ = cv2.getTextSize(
+            f"ZPLATE | {data_hora}", fonte, font_size_plate, 1
+        )
+        x_inicio = largura - largura_texto - 10
+        y_inicio = altura - altura_texto - 10
+        x_fim = largura
+        y_fim = y_inicio + altura_texto + 10
+
+        cv2.rectangle(
+            imagem, (x_inicio, y_inicio), (x_fim, y_fim), color_black, thickness=-1
+        )
+        cv2.putText(
+            imagem,
+            f"ZPLATE | {data_hora}",
+            (x_inicio + 5, y_inicio + altura_texto + 5),
+            fonte,
+            font_size_plate,
+            color_white,
+            1,
+        )
+        return imagem
+    except Exception as e:
+        logging.error(f"Erro ao adicionar data/hora: {e}")
+        return imagem
 
 
 def comprimir_salvar(path_to_save, image, taxa):
-    cv2.imwrite(path_to_save, image, [cv2.IMWRITE_JPEG_QUALITY, taxa])
+    try:
+        cv2.imwrite(path_to_save, image, [cv2.IMWRITE_JPEG_QUALITY, taxa])
+    except Exception as e:
+        logging.error(f"Erro ao salvar imagem: {e}")
 
 
 def capture_frames(cap, frame_queue):
     while True:
-        ret, frame = cap.read()
-        if ret:
-            if frame_queue.full():
-                frame_queue.get()
-            frame_queue.put(frame)
+        try:
+            ret, frame = cap.read()
+            if ret:
+                if frame_queue.full():
+                    frame_queue.get()
+                frame_queue.put(frame)
+        except Exception as e:
+            logging.error(f"Erro ao capturar frames: {e}")
+            exit(1)
+            continue
 
 
 def AlprStart(region):
@@ -107,17 +137,22 @@ def AlprStart(region):
         alpr.set_top_n(10)
         if not alpr.is_loaded():
             logging.error(f"Erro ao carregar o OpenALPR: {region}")
-            exit(1)
+            encerrar_thread(camera_ip)
+            return
+            # exit(1)
         # logging.info(f"OpenALPR carregado para região: {region}")
         return alpr
     except Exception as e:
         logging.error(f"AlprStart: {e}")
-        exit(1)
+        encerrar_thread(camera_ip)
+        return
+        # exit(1)
 
 
 def StreamStart(rtsp_url):
     # logging.info(f"Iniciando stream RTSP")
-    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    cap = cv2.VideoCapture(rtsp_url)
+    # cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
         logging.error(f"Falha ao conectar ao stream RTSP")
@@ -127,8 +162,8 @@ def StreamStart(rtsp_url):
 
 
 def extract_results(results):
-    resultset = {}
     try:
+        resultset = {}
         for resultado in results["results"]:
             region = resultado["region"]
             coordinates = resultado["coordinates"]
@@ -151,70 +186,75 @@ def extract_results(results):
 
 
 def recortar_regiao(imagem, alpr_results):
-    x_min, x_max, y_min, y_max = roi(alpr_results["pontos"])
-    margem = 400
-    x_min = max(x_min - margem, 0)
-    y_min = max(y_min - margem, 0)
-    x_max = min(x_max + 200, imagem.shape[1])
-    y_max = min(y_max + 200, imagem.shape[0])
-    cropped_image = imagem[y_min:y_max, x_min:x_max]
-    return cropped_image
+    try:
+        x_min, x_max, y_min, y_max = roi(alpr_results["pontos"])
+        margem = 400
+        x_min = max(x_min - margem, 0)
+        y_min = max(y_min - margem, 0)
+        x_max = min(x_max + 200, imagem.shape[1])
+        y_max = min(y_max + 200, imagem.shape[0])
+        cropped_image = imagem[y_min:y_max, x_min:x_max]
+        return cropped_image
+    except Exception as e:
+        logging.error(f"Erro ao recortar região: {e}")
 
 
 def roi(pontos):
-    if pontos is not None and len(pontos) > 0:
+    try:
         x_min = min(ponto[0] for ponto in pontos)  # Ponto horizontal esquerdo
         x_max = max(ponto[0] for ponto in pontos)  # Ponto horizontal direito
         y_min = min(ponto[1] for ponto in pontos)  # Ponto vertical superior
         y_max = max(ponto[1] for ponto in pontos)  # Ponto vertical inferior
         return x_min, x_max, y_min, y_max  # retorna coordenadas roi alpr_results
-    else:
-        logging.error("Erro: Não foi possível determinar os pontos de recorte.")
+    except Exception as e:
+        logging.error(f"Erro ao calcular ROI: {e}")
         return None, None, None, None
 
 
 def desenha_placa(imagem, alpr_results):
-    img_cp = imagem.copy()
-    plate = alpr_results["plate"]
-    pontos = alpr_results["pontos"]
-    region = alpr_results["region"]
-    x_min, x_max, y_min, y_max = roi(pontos)
-    cv2.polylines(img_cp, [pontos], isClosed=True, color=color_green, thickness=2)
-    (largura_texto, altura_texto), _ = cv2.getTextSize(
-        f"  {plate}  ", fonte, font_size_plate, 1
-    )
-    x_inicio = x_min
-    y_inicio = y_min
-    x_fim = x_inicio + largura_texto + 10
-    y_fim = y_inicio - altura_texto - 10
-    cv2.rectangle(
-        img_cp, (x_inicio, y_inicio), (x_fim, y_fim), color_black, thickness=-1
-    )
-    cv2.putText(
-        img_cp,
-        f"  {plate}  ",
-        (x_inicio + 5, y_inicio - 5),
-        fonte,
-        font_size_plate,
-        color_white,
-        1,
-    )
-    return img_cp
+    try:
+        img_cp = imagem.copy()
+        plate = alpr_results["plate"]
+        pontos = alpr_results["pontos"]
+        x_min, x_max, y_min, y_max = roi(pontos)
+        cv2.polylines(img_cp, [pontos], isClosed=True, color=color_green, thickness=2)
+        (largura_texto, altura_texto), _ = cv2.getTextSize(
+            f"  {plate}  ", fonte, font_size_plate, 1
+        )
+        x_inicio = x_min
+        y_inicio = y_min
+        x_fim = x_inicio + largura_texto + 10
+        y_fim = y_inicio - altura_texto - 10
+        cv2.rectangle(
+            img_cp, (x_inicio, y_inicio), (x_fim, y_fim), color_black, thickness=-1
+        )
+        cv2.putText(
+            img_cp,
+            f"  {plate}  ",
+            (x_inicio + 5, y_inicio - 5),
+            fonte,
+            font_size_plate,
+            color_white,
+            1,
+        )
+        return img_cp
+    except Exception as e:
+        logging.error(f"Erro ao desenhar placa: {e}")
+        return imagem
 
 
 def desenha_candidatas(imagem, alpr_results):
-    img_cp = imagem.copy()
-    candidates = alpr_results["candidates"]
-    region = alpr_results["region"]
-    candidates = [
-        {
-            "plate": candidate["plate"],
-            "confidence": f"{float(candidate['confidence']) * 1:.2f}%",
-        }
-        for candidate in candidates
-    ]
-
     try:
+        img_cp = imagem.copy()
+        candidates = alpr_results["candidates"]
+        candidates = [
+            {
+                "plate": candidate["plate"],
+                "confidence": f"{float(candidate['confidence']) * 1:.2f}%",
+            }
+            for candidate in candidates
+        ]
+
         altura_box = 0
         largura_box = 0
         offset_text = 0
@@ -248,16 +288,16 @@ def desenha_candidatas(imagem, alpr_results):
                 1,
             )
             y_offset = y_offset + (offset_text + 10)
+        return img_cp
     except Exception as e:
         logging.error(f"Erro ao desenhar candidatas: {e}")
-    return img_cp
+        return imagem
 
 
 def monitorar_comandos():
     global running, comando_var
     while running:
         comando = input("groot_cmd$ running... \n").strip().lower()
-        # print('')
         if comando == "sair":
             logging.info("Encerrando o programa...")
             running = False
@@ -288,16 +328,8 @@ def monitorar_threads():
     with lock:
         for camera_ip, thread in list(threads.items()):
             if not thread.is_alive():  # Se a thread foi encerrada
-                # logging.error(f"CCTV '{camera_ip}' foi encerrada.")
-                # threads.pop(camera_ip)  # Remove do dicionário
-                # Ação planejada: reiniciar ou apenas registrar
-                # reiniciar = input(f"Deseja reiniciar CCTV '{camera_ip}'? (s/n): ")
-                # logging.info(f"REINICIAR: {reiniciar}")
-                # if reiniciar == "s":
-                #     print(f"Reiniciar CCTV '{camera_ip}' Sim")
-                #     continue
-                # else:
-                #     print(f"Reiniciar CCTV '{camera_ip}' Nao")
+                logging.error(f"CCTV '{camera_ip}' foi encerrada.")
+                threads.pop(camera_ip)  # Remove do dicionário
                 continue
 
 
@@ -317,27 +349,47 @@ def iniciar_thread(camera_ip, porta, usuario, senha):
             nova_thread.start()
 
 
+def encerrar_thread(camera_ip):
+    global threads
+    with lock:
+        if camera_ip in threads:
+            thread = threads[camera_ip]
+            if thread.is_alive():
+                thread.join(timeout=1)
+                logging.info(f"Thread '{camera_ip}' encerrada.")
+            else:
+                logging.info(f"Thread '{camera_ip}' já encerrada.")
+            threads.pop(camera_ip)
+        else:
+            logging.error(f"CCTV '{camera_ip}' não está ativa.")
+
+
 def t_processar_rtsp_alpr(camera_ip, porta, usuario, senha):
+    t_running = True
+    cap = None
+    alpr_eu = None
+    alpr_us = None
+
     try:
         rtsp_url, err = obter_rtsp_url(camera_ip, porta, usuario, senha)
         if err is not None:
             logging.error(f"Erro ao obter_rtsp_url '{camera_ip}': {err}")
-            exit(1)
+            t_running = False
         ret, cap = StreamStart(rtsp_url)
-        if ret is None:
+        if ret is None or t_running is False:
             logging.info(f"Falha ao obter Stream: {camera_ip}")
-            exit(1)
-        frame_queue = Queue(maxsize=1)
-        threading.Thread(
-            target=capture_frames, args=(cap, frame_queue), daemon=True
-        ).start()
+            t_running = False
 
-        alpr_eu = AlprStart("eu")
-        alpr_us = AlprStart("us")
+        if t_running:
+            frame_queue = Queue(maxsize=1)
+            threading.Thread(
+                target=capture_frames, args=(cap, frame_queue), daemon=True
+            ).start()
+            alpr_eu = AlprStart("eu")
+            alpr_us = AlprStart("us")
+            alpr_list = [alpr_eu, alpr_us]
 
-        alpr_list = [alpr_eu, alpr_us]
-
-        while True:
+        while t_running:
             if not frame_queue.empty():
                 frame = frame_queue.get()
                 frame_cp = adicionar_data_hora(frame.copy())
@@ -348,6 +400,10 @@ def t_processar_rtsp_alpr(camera_ip, porta, usuario, senha):
                 for alpr_instance in alpr_list:
                     results_alpr = alpr_instance.recognize_ndarray(np_image)
                     results_alpr = extract_results(results_alpr)
+                    results_alpr["camera_ip"] = camera_ip
+                    results_alpr["timestamp"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
 
                     # cv2.imwrite('plates/X_screenshot.jpg', frame)
 
@@ -355,35 +411,54 @@ def t_processar_rtsp_alpr(camera_ip, porta, usuario, senha):
                         result_set.append(results_alpr)
 
                     if results_alpr:
-                        region = results_alpr["region"]
-                        plate = results_alpr["plate"]
-                        img_plate = desenha_placa(frame.copy(), results_alpr)
-                        img_plate = recortar_regiao(img_plate, results_alpr)
-                        img_plate = desenha_candidatas(img_plate, results_alpr)
-                        img_plate = adicionar_data_hora(img_plate)
+                        try:
+                            region = results_alpr["region"]
+                            plate = results_alpr["plate"]
+                            candidates = results_alpr["candidates"]
+                            img_plate = desenha_placa(frame.copy(), results_alpr)
+                            img_plate = recortar_regiao(img_plate, results_alpr)
+                            img_plate = desenha_candidatas(img_plate, results_alpr)
+                            img_plate = adicionar_data_hora(img_plate)
+                            comprimir_salvar(
+                                f"plates/{plate}_{region}_{camera_ip}.jpg",
+                                img_plate,
+                                25,
+                            )
 
-                        # cv2.imwrite(f"plates/{plate}_{region}_{camera_ip}.jpg", img_plate)
+                            dados_adicionais = {
+                                "camera_ip": results_alpr["camera_ip"],
+                                "timestamp": results_alpr["timestamp"],
+                                "plate": plate,
+                                "region": region,
+                                "confidence": f"{int(round(results_alpr['confidence'], 2))}%",
+                                "candidates": [
+                                    {
+                                        "plate": c["plate"],
+                                        "confidence": f"{int(round(c['confidence'], 2))}%",
+                                    }
+                                    for c in candidates
+                                ],
+                            }
+                            post_data = post_screenshot(
+                                "pyzplate", "imagen", dados_adicionais
+                            )
 
-                        comprimir_salvar(
-                            f"plates/{plate}_{region}_{camera_ip}.jpg", img_plate, 25
-                        )
+                        except Exception as e:
+                            # logging.error(f"Erro ao processar imagem: {e}")
+                            continue
 
-                # if result_set:
-                # print('----------- >')
-                # print(result_set)
-                # print('----------- <')
-
-            continue
+        logging.error(f"Thread '{camera_ip}' foi encerrada: {e}")
+        liberar_recursos(cap, [alpr_eu, alpr_us])
 
     except Exception as e:
-        print(f"Thread '{camera_ip}' foi encerrada: {e}")
+        logging.error(f"Thread '{camera_ip}' foi encerrada: {e}")
         liberar_recursos(cap, [alpr_eu, alpr_us])
 
 
 camera_ip = "192.168.7.66"
 porta = 80
-usuario = "zplate"
-senha = "iMo_brc_m79_brsul"
+usuario = "brtronic"
+senha = "iMo_brc_m79"
 
 camera_list = [
     {"name": "BALBIO_INT_OLFAR", "host": "192.168.7.56"},
@@ -422,3 +497,4 @@ if __name__ == "__main__":
         logging.error("Programa interrompido manualmente.")
     finally:
         logging.info("Programa encerrado.")
+        # liberar_recursos(cap, [alpr_eu, alpr_us])
